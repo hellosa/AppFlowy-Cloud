@@ -3,11 +3,10 @@ use appflowy_ai_client::dto::EmbeddingModel;
 use async_openai::config::{AzureConfig, Config, OpenAIConfig};
 use async_openai::types::{CreateEmbeddingRequest, CreateEmbeddingResponse};
 use async_openai::Client;
+use std::env;
 use text_splitter::{ChunkConfig, TextSplitter};
 use tiktoken_rs::CoreBPE;
 use tracing::{trace, warn};
-
-pub const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 
 pub const REQUEST_PARALLELISM: usize = 40;
 
@@ -18,7 +17,10 @@ pub struct OpenAIEmbedder {
 
 impl OpenAIEmbedder {
   pub fn new(config: OpenAIConfig) -> Self {
-    let client = Client::with_config(config);
+    let api_base = env::var("OPENAI_API_BASE")
+      .expect("OPENAI_API_BASE must be set in the .env file");
+
+    let client = Client::with_config(config.with_api_base(api_base));
 
     Self { client }
   }
