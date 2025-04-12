@@ -76,19 +76,54 @@ async def main():
         base_query += " ORDER BY c.created_at ASC" # Process older documents first
 
         async with pool.acquire() as conn:
-            # asyncpg cursors are iterated directly
-            cursor = conn.cursor(base_query, *query_params)
-            logger.info("Opened database cursor to fetch documents.")
+            async with conn.transaction(): # Cursors require a transaction
+                # asyncpg cursors are iterated directly
+                cursor = conn.cursor(base_query, *query_params)
+                logger.info("Opened database cursor to fetch documents.")
 
-            tasks_in_current_batch = []
-            async for row in cursor:
-                total_fetched += 1
-                if args.limit is not None and total_fetched > args.limit:
-                    logger.info(f"Reached specified limit of {args.limit} documents during fetch.")
-                    # Process the final partial batch before breaking
-                    if tasks_in_current_batch:
+                tasks_in_current_batch = []
+                async for row in cursor:
+                    total_fetched += 1
+                    if args.limit is not None and total_fetched > args.limit:
+                        logger.info(f"Reached specified limit of {args.limit} documents during fetch.")
+                        # Process the final partial batch before breaking
+                        if tasks_in_current_batch:
+                            if args.dry_run:
+                                logger.info(f"[Dry Run] Would enqueue final {len(tasks_in_current_batch)} tasks:")
+                                for task in tasks_in_current_batch:
+                                    logger.info(f"  - { {k.decode(): v.decode() for k,v in task.items()} }")
+                                total_enqueued += len(tasks_in_current_batch)
+                            else:
+                                pipeline = redis_client.pipeline()
+                                for task_payload in tasks_in_current_batch:
+                                    pipeline.xadd(args.redis_stream_key, task_payload)
+                                results = await pipeline.execute()
+                                success_count = sum(1 for r in results if r)
+                                total_enqueued += success_count
+                                logger.info(f"Enqueued final {success_count} tasks to Redis stream '{args.redis_stream_key}'")
+                                if success_count < len(tasks_in_current_batch):
+                                    logger.warning(f"Failed to enqueue {len(tasks_in_current_batch) - success_count} tasks in final batch.")
+                        break # Exit the loop after processing the final batch due to limit
+
+                    object_id = str(row['oid'])
+                    workspace_id = str(row['workspace_id'])
+                    created_at_ts = time.time() # Use current time for enqueueing
+
+                    # IMPORTANT: Enqueuing WITHOUT 'data' field.
+                    # The worker (main.py) will need modification to fetch content.
+                    task_payload = {
+                        b"workspace_id": workspace_id.encode('utf-8'),
+                        b"object_id": object_id.encode('utf-8'),
+                        b"collab_type": str(collab_type_document).encode('utf-8'),
+                        b"created_at": str(created_at_ts).encode('utf-8'),
+                    }
+                    tasks_in_current_batch.append(task_payload)
+
+                    # Enqueue when batch size is reached
+                    if len(tasks_in_current_batch) >= args.batch_size:
+                        logger.info(f"Processing batch of {len(tasks_in_current_batch)} documents (Total fetched: {total_fetched})...")
                         if args.dry_run:
-                            logger.info(f"[Dry Run] Would enqueue final {len(tasks_in_current_batch)} tasks:")
+                            logger.info("[Dry Run] Would enqueue tasks:")
                             for task in tasks_in_current_batch:
                                 logger.info(f"  - { {k.decode(): v.decode() for k,v in task.items()} }")
                             total_enqueued += len(tasks_in_current_batch)
@@ -99,63 +134,29 @@ async def main():
                             results = await pipeline.execute()
                             success_count = sum(1 for r in results if r)
                             total_enqueued += success_count
-                            logger.info(f"Enqueued final {success_count} tasks to Redis stream '{args.redis_stream_key}'")
+                            logger.info(f"Enqueued {success_count} tasks to Redis stream '{args.redis_stream_key}'")
                             if success_count < len(tasks_in_current_batch):
-                                logger.warning(f"Failed to enqueue {len(tasks_in_current_batch) - success_count} tasks in final batch.")
-                    break # Exit the loop after processing the final batch due to limit
+                                logger.warning(f"Failed to enqueue {len(tasks_in_current_batch) - success_count} tasks.")
+                        tasks_in_current_batch = [] # Clear batch
 
-                object_id = str(row['oid'])
-                workspace_id = str(row['workspace_id'])
-                created_at_ts = time.time() # Use current time for enqueueing
-
-                # IMPORTANT: Enqueuing WITHOUT 'data' field.
-                # The worker (main.py) will need modification to fetch content.
-                task_payload = {
-                    b"workspace_id": workspace_id.encode('utf-8'),
-                    b"object_id": object_id.encode('utf-8'),
-                    b"collab_type": str(collab_type_document).encode('utf-8'),
-                    b"created_at": str(created_at_ts).encode('utf-8'),
-                }
-                tasks_in_current_batch.append(task_payload)
-
-                # Enqueue when batch size is reached
-                if len(tasks_in_current_batch) >= args.batch_size:
-                    logger.info(f"Processing batch of {len(tasks_in_current_batch)} documents (Total fetched: {total_fetched})...")
-                    if args.dry_run:
-                        logger.info("[Dry Run] Would enqueue tasks:")
-                        for task in tasks_in_current_batch:
-                            logger.info(f"  - { {k.decode(): v.decode() for k,v in task.items()} }")
-                        total_enqueued += len(tasks_in_current_batch)
-                    else:
-                        pipeline = redis_client.pipeline()
-                        for task_payload in tasks_in_current_batch:
-                            pipeline.xadd(args.redis_stream_key, task_payload)
-                        results = await pipeline.execute()
-                        success_count = sum(1 for r in results if r)
-                        total_enqueued += success_count
-                        logger.info(f"Enqueued {success_count} tasks to Redis stream '{args.redis_stream_key}'")
-                        if success_count < len(tasks_in_current_batch):
-                            logger.warning(f"Failed to enqueue {len(tasks_in_current_batch) - success_count} tasks.")
-                    tasks_in_current_batch = [] # Clear batch
-
-            # Process any remaining tasks after the loop finishes naturally
-            if tasks_in_current_batch:
-                 logger.info(f"Processing final batch of {len(tasks_in_current_batch)} documents (Total fetched: {total_fetched})...")
-                 if args.dry_run:
-                     logger.info("[Dry Run] Would enqueue final tasks:")
-                     for task in tasks_in_current_batch:
-                         logger.info(f"  - { {k.decode(): v.decode() for k,v in task.items()} }")
-                     total_enqueued += len(tasks_in_current_batch)
-                 else:
-                     pipeline = redis_client.pipeline()
-                     for task_payload in tasks_in_current_batch:
-                         pipeline.xadd(args.redis_stream_key, task_payload)
-                     results = await pipeline.execute()
-                     success_count = sum(1 for r in results if r)
-                     total_enqueued += success_count
-                     logger.info(f"Enqueued final {success_count} tasks to Redis stream '{args.redis_stream_key}'")
-                     if success_count < len(tasks_in_current_batch):
-                         logger.warning(f"Failed to enqueue {len(tasks_in_current_batch) - success_count} tasks in final batch.")
+                # Process any remaining tasks after the loop finishes naturally
+                if tasks_in_current_batch:
+                     logger.info(f"Processing final batch of {len(tasks_in_current_batch)} documents (Total fetched: {total_fetched})...")
+                     if args.dry_run:
+                         logger.info("[Dry Run] Would enqueue final tasks:")
+                         for task in tasks_in_current_batch:
+                             logger.info(f"  - { {k.decode(): v.decode() for k,v in task.items()} }")
+                         total_enqueued += len(tasks_in_current_batch)
+                     else:
+                         pipeline = redis_client.pipeline()
+                         for task_payload in tasks_in_current_batch:
+                             pipeline.xadd(args.redis_stream_key, task_payload)
+                         results = await pipeline.execute()
+                         success_count = sum(1 for r in results if r)
+                         total_enqueued += success_count
+                         logger.info(f"Enqueued final {success_count} tasks to Redis stream '{args.redis_stream_key}'")
+                         if success_count < len(tasks_in_current_batch):
+                             logger.warning(f"Failed to enqueue {len(tasks_in_current_batch) - success_count} tasks in final batch.")
 
     except (ConnectionRefusedError, asyncpg.exceptions.CannotConnectNowError) as e:
         logger.critical(f"Could not connect to Database or Redis: {e}")
