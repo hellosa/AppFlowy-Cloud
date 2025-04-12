@@ -132,27 +132,31 @@ class UnindexedCollabTask(BaseModel):
     object_id: str
     collab_type: str
     created_at: datetime
-    data: UnindexedData
+    data: Optional[UnindexedData]
 
     @classmethod
     def from_redis_message(cls, stream_id: str, message: Dict[bytes, bytes]) -> Optional['UnindexedCollabTask']:
         try:
             decoded_message = {k.decode('utf-8'): v.decode('utf-8') for k, v in message.items()}
-            # Extract fields based on the structure observed in Rust code
-            # Assuming keys like 'workspace_id', 'object_id', etc. exist
             workspace_id = decoded_message.get('workspace_id')
             object_id = decoded_message.get('object_id')
             collab_type = decoded_message.get('collab_type')
             created_at_ts_str = decoded_message.get('created_at')
             data_json = decoded_message.get('data')
 
-            if not all([workspace_id, object_id, collab_type, created_at_ts_str, data_json]):
-                logger.warning(f"Missing required fields in message {stream_id}: {decoded_message}")
+            if not all([workspace_id, object_id, collab_type, created_at_ts_str]):
+                logger.warning(f"Missing required base fields in message {stream_id}: {decoded_message}")
                 return None
 
-            # Convert timestamp (assuming it's seconds since epoch)
             created_at = datetime.fromtimestamp(float(created_at_ts_str), tz=timezone.utc)
-            data = UnindexedData.parse_raw(data_json)
+            data_obj = None
+            if data_json:
+                 try:
+                    data_obj = UnindexedData.parse_raw(data_json)
+                 except Exception as parse_error:
+                     logger.error(f"Failed to parse 'data' field for message {stream_id}: {parse_error}. Data: {data_json}")
+                     # Decide if you want to proceed without data or fail
+                     # Proceeding without data for now, it will be fetched later if needed.
 
             return cls(
                 stream_id=stream_id,
@@ -160,10 +164,10 @@ class UnindexedCollabTask(BaseModel):
                 object_id=object_id,
                 collab_type=collab_type,
                 created_at=created_at,
-                data=data,
+                data=data_obj,
             )
         except Exception as e:
-            logger.error(f"Failed to parse Redis message {stream_id}: {message}. Error: {e}")
+            logger.error(f"Failed to parse Redis message structure {stream_id}: {message}. Error: {e}")
             return None
 
 @dataclass
@@ -433,6 +437,38 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
                 # Transaction automatically rolls back
                 raise # Re-raise to signal failure
 
+async def fetch_document_content(pool: asyncpg.Pool, object_id: str) -> Optional[List[str]]:
+    """Placeholder function to fetch document content.
+
+    Attempts to fetch the raw data blob from af_collab.
+    Actual implementation needs to handle decoding this blob into paragraphs,
+    which is complex and likely requires replicating Rust logic.
+    Returns None if content cannot be retrieved or decoded by this placeholder.
+    """
+    logger.info(f"Task {object_id} missing data, attempting to fetch content from DB.")
+    try:
+        # Assuming partition_key 0 is Document
+        # Assuming 'data' column holds the collab blob
+        query = "SELECT data FROM af_collab WHERE oid = $1 AND partition_key = 0"
+        row = await pool.fetchrow(query, uuid.UUID(object_id))
+
+        if row and row['data']:
+            # We found the blob, but decoding it here is complex.
+            # In a real scenario, you would call Rust code or a dedicated service
+            # to decode this blob (row['data']) into paragraphs.
+            logger.warning(f"Found data blob for {object_id}, but decoding logic is NOT IMPLEMENTED in this script. Skipping task.")
+            # For demonstration, return None. Replace this with actual decoding if possible.
+            return None
+        elif row:
+            logger.error(f"Found collab row for {object_id}, but 'data' column is null or missing.")
+            return None
+        else:
+            logger.error(f"Could not find collab row for object_id {object_id} in af_collab table.")
+            return None
+    except Exception as e:
+        logger.error(f"Database error fetching content for {object_id}: {e}")
+        return None
+
 
 # --- Redis Operations ---
 
@@ -518,9 +554,20 @@ async def process_task(task: UnindexedCollabTask, pool: asyncpg.Pool, embedder: 
     start_time = time.monotonic()
     logger.info(f"Processing task for object {task.object_id} ({task.collab_type})")
 
-    paragraphs = task.data.get_paragraphs()
+    paragraphs = None
+    if task.data:
+        paragraphs = task.data.get_paragraphs()
+    else:
+        # Data was missing, attempt to fetch it
+        fetched_paragraphs = await fetch_document_content(pool, task.object_id)
+        if fetched_paragraphs:
+            paragraphs = fetched_paragraphs
+        else:
+            logger.warning(f"Could not get/process content for task {task.object_id} (data was missing and fetch failed/not implemented). Skipping.")
+            return None # Skip task if content cannot be obtained
+
     if not paragraphs:
-        logger.warning(f"Task {task.object_id} has no paragraphs/text to process.")
+        logger.warning(f"Task {task.object_id} has no paragraphs/text to process (either initially or after fetch attempt).")
         return None
 
     chunks = create_chunks(task.object_id, paragraphs, embedder.model_name())
