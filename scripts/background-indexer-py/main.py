@@ -439,7 +439,7 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
 async def ensure_redis_group(redis_client: redis.Redis, stream_key: str, group_name: str):
     try:
         await redis_client.xgroup_create(stream_key, group_name, id='0', mkstream=True)
-        logger.info(f"Consumer group '{group_name}' created or already exists for stream '{stream_key}'.")
+        logger.info(f"Consumer group '{group_name}' created for stream '{stream_key}'.")
     except redis.exceptions.ResponseError as e:
         if "BUSYGROUP Consumer Group name already exists" in str(e):
             logger.info(f"Consumer group '{group_name}' already exists for stream '{stream_key}'.")
@@ -461,6 +461,7 @@ async def read_tasks_from_redis(redis_client: redis.Redis, args: Args) -> AsyncG
             )
 
             if not response:
+                logger.debug("No new messages in Redis stream for this consumer.")
                 yield [] # No new messages
                 continue
 
@@ -484,21 +485,31 @@ async def read_tasks_from_redis(redis_client: redis.Redis, args: Args) -> AsyncG
             if tasks:
                  logger.info(f"Read {len(tasks)} tasks from Redis stream")
                  yield tasks
+            else:
+                # This case might happen if all messages read were unparseable
+                logger.debug("Read messages, but none were parseable tasks.")
+                yield []
 
             # ACK processed/skipped messages
             if message_ids_to_ack:
                 try:
                     await redis_client.xack(args.redis_stream_key, args.redis_group_name, *message_ids_to_ack)
                     logger.debug(f"ACKed {len(message_ids_to_ack)} messages.")
-                except Exception as e:
+                except Exception as e: # Catch broad exception for ACK failure
                     logger.error(f"Failed to ACK messages: {message_ids_to_ack}. Error: {e}")
                     # Decide how to handle ACK failure (retry? log and continue?)
 
-        except redis.exceptions.ConnectionError as e:
+        except redis.exceptions.ConnectionError as e: # Corrected path
             logger.error(f"Redis connection error: {e}. Retrying in 5 seconds...")
             await asyncio.sleep(5)
-        except Exception as e:
-            logger.error(f"Error reading from Redis stream: {e}. Retrying in 5 seconds...")
+        except redis.exceptions.TimeoutError:
+             logger.debug("Redis read timed out (expected during blocking wait). Will retry.")
+             yield [] # No messages received
+        except redis.exceptions.RedisError as e: # Catch other specific Redis errors
+            logger.error(f"Redis error reading stream: {e}. Retrying in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e: # Catch any other unexpected errors
+            logger.exception(f"Unexpected error reading from Redis stream: {e}. Retrying in 5 seconds...")
             await asyncio.sleep(5)
 
 # --- Main Processing Logic ---
