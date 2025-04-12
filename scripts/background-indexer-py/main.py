@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import ssl # Import ssl module
 import time
 import uuid
 from dataclasses import dataclass
@@ -140,7 +141,18 @@ class Embedder:
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def start(self):
-        self.session = aiohttp.ClientSession()
+        # WARNING: Disabling SSL verification is insecure. Only use if you trust the endpoint.
+        # Create an SSL context that does not verify certificates
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        logger.warning("Disabling SSL certificate verification for HTTP client. Ensure you trust the API endpoint(s).")
+
+        # Create a TCPConnector with the custom SSL context
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+        # Create the ClientSession with the custom connector
+        self.session = aiohttp.ClientSession(connector=connector)
 
     async def stop(self):
         if self.session:
