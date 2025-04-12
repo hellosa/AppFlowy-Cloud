@@ -363,15 +363,7 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
                 """
                 await conn.execute(state_query, record.object_id)
                 
-                # Store tokens_indexed in metadata if needed (optional)
-                tokens_metadata_query = """
-                UPDATE af_collab
-                SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{tokens_indexed}', to_jsonb($2::int))
-                WHERE oid = $1;
-                """
-                await conn.execute(tokens_metadata_query, record.object_id, record.tokens_used)
-                
-                logger.info(f"Successfully wrote embeddings to af_collab_embeddings and updated state for {record.object_id}, tokens: {record.tokens_used}")
+                logger.info(f"Successfully wrote embeddings to af_collab_embeddings and updated state for {record.object_id}")
 
             except Exception as e:
                 logger.exception(f"Database transaction failed for {record.object_id}: {e}")
