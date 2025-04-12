@@ -344,7 +344,8 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
                             chunk.fragment_id,
                             0, # content_type (assuming 0 = PlainText)
                             chunk.content,
-                            chunk.embedding,
+                            # Convert list to pgvector string format '[1.0,2.0,...]'
+                            '[' + ",".join(map(str, chunk.embedding)) + ']' if chunk.embedding else None,
                             json.dumps({}), # metadata (empty JSON object)
                             chunk.paragraph_index, # Use paragraph_index as fragment_index for simplicity
                             0, # embedder_type (assuming 0 = default)
