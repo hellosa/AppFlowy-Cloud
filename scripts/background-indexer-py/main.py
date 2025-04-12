@@ -327,22 +327,27 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
                 chunks_to_write = [chunk for chunk in record.chunks if chunk.embedding is not None]
                 if chunks_to_write:
                     upsert_query = """
-                    INSERT INTO af_collab_embeddings (oid, fragment_id, content, embedding, token_count)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO af_collab_embeddings (oid, fragment_id, content_type, content, embedding, metadata, fragment_index, embedder_type)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (oid, fragment_id)
                     DO UPDATE SET
                         content = EXCLUDED.content,
                         embedding = EXCLUDED.embedding,
-                        token_count = EXCLUDED.token_count,
-                        updated_at = NOW();
+                        metadata = EXCLUDED.metadata,
+                        fragment_index = EXCLUDED.fragment_index,
+                        embedder_type = EXCLUDED.embedder_type,
+                        indexed_at = NOW();
                     """
                     data_to_insert = [
                         (
                             chunk.object_id,
                             chunk.fragment_id,
+                            0, # content_type (assuming 0 = PlainText)
                             chunk.content,
                             chunk.embedding,
-                            len(chunk.content) if chunk.content else 0
+                            json.dumps({}), # metadata (empty JSON object)
+                            chunk.paragraph_index, # Use paragraph_index as fragment_index for simplicity
+                            0, # embedder_type (assuming 0 = default)
                          )
                         for chunk in chunks_to_write
                     ]
