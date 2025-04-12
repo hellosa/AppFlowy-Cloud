@@ -327,8 +327,8 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
                 chunks_to_write = [chunk for chunk in record.chunks if chunk.embedding is not None]
                 if chunks_to_write:
                     upsert_query = """
-                    INSERT INTO af_collab_embeddings (oid, collab_type, fragment_id, content, embedding, token_count)
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    INSERT INTO af_collab_embeddings (oid, fragment_id, content, embedding, token_count)
+                    VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (oid, fragment_id)
                     DO UPDATE SET
                         content = EXCLUDED.content,
@@ -339,7 +339,6 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
                     data_to_insert = [
                         (
                             chunk.object_id,
-                            int(record.collab_type),
                             chunk.fragment_id,
                             chunk.content,
                             chunk.embedding,
