@@ -355,13 +355,22 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
                     await conn.executemany(upsert_query, data_to_insert)
                     logger.debug(f"Upserted {len(chunks_to_write)} chunks into af_collab_embeddings for {record.object_id}")
 
+                # Update indexed_at in af_collab table instead of using embedding_collab_index_state
                 state_query = """
-                INSERT INTO embedding_collab_index_state (object_id, workspace_id, indexed_at, tokens_indexed)
-                VALUES ($1, $2, NOW(), $3)
-                ON CONFLICT (object_id)
-                DO UPDATE SET indexed_at = NOW(), tokens_indexed = $3;
-                 """
-                await conn.execute(state_query, record.object_id, record.workspace_id, record.tokens_used)
+                UPDATE af_collab
+                SET indexed_at = NOW()
+                WHERE oid = $1;
+                """
+                await conn.execute(state_query, record.object_id)
+                
+                # Store tokens_indexed in metadata if needed (optional)
+                tokens_metadata_query = """
+                UPDATE af_collab
+                SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{tokens_indexed}', to_jsonb($2::int))
+                WHERE oid = $1;
+                """
+                await conn.execute(tokens_metadata_query, record.object_id, record.tokens_used)
+                
                 logger.info(f"Successfully wrote embeddings to af_collab_embeddings and updated state for {record.object_id}, tokens: {record.tokens_used}")
 
             except Exception as e:
