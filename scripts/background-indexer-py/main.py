@@ -299,8 +299,8 @@ def create_chunks(object_id: uuid.UUID, paragraphs: List[str], model: str) -> Li
 
 async def get_collab_embedding_fragment_ids(pool: asyncpg.Pool, object_id: uuid.UUID) -> set[str]:
     query = """
-    SELECT fragment_id FROM embedding_chunks
-    WHERE object_id = $1
+    SELECT fragment_id FROM af_collab_embeddings
+    WHERE oid = $1
     """
     try:
         rows = await pool.fetch(query, object_id)
@@ -313,25 +313,25 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
     async with pool.acquire() as conn:
         async with conn.transaction():
             try:
-                existing_query = "SELECT fragment_id FROM embedding_chunks WHERE object_id = $1"
+                existing_query = "SELECT fragment_id FROM af_collab_embeddings WHERE oid = $1"
                 existing_rows = await conn.fetch(existing_query, record.object_id)
                 existing_fragment_ids = {row['fragment_id'] for row in existing_rows}
                 new_fragment_ids = {chunk.fragment_id for chunk in record.chunks}
                 to_delete = existing_fragment_ids - new_fragment_ids
 
                 if to_delete:
-                    delete_query = "DELETE FROM embedding_chunks WHERE object_id = $1 AND fragment_id = ANY($2::varchar[])"
+                    delete_query = "DELETE FROM af_collab_embeddings WHERE oid = $1 AND fragment_id = ANY($2::varchar[])"
                     await conn.execute(delete_query, record.object_id, list(to_delete))
                     logger.debug(f"Deleted {len(to_delete)} old chunks for {record.object_id}")
 
                 chunks_to_write = [chunk for chunk in record.chunks if chunk.embedding is not None]
                 if chunks_to_write:
                     upsert_query = """
-                    INSERT INTO embedding_chunks (object_id, workspace_id, collab_type, fragment_id, chunk, embedding, token_count)
+                    INSERT INTO af_collab_embeddings (oid, workspace_id, collab_type, fragment_id, content, embedding, token_count)
                     VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    ON CONFLICT (object_id, fragment_id)
+                    ON CONFLICT (oid, fragment_id)
                     DO UPDATE SET
-                        chunk = EXCLUDED.chunk,
+                        content = EXCLUDED.content,
                         embedding = EXCLUDED.embedding,
                         token_count = EXCLUDED.token_count,
                         updated_at = NOW();
@@ -340,7 +340,7 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
                         (
                             chunk.object_id,
                             record.workspace_id,
-                            int(record.collab_type), # Convert back to int for DB
+                            int(record.collab_type),
                             chunk.fragment_id,
                             chunk.content,
                             chunk.embedding,
@@ -349,23 +349,20 @@ async def write_embeddings_to_db(pool: asyncpg.Pool, record: EmbeddingRecord):
                         for chunk in chunks_to_write
                     ]
                     await conn.executemany(upsert_query, data_to_insert)
-                    logger.debug(f"Upserted {len(chunks_to_write)} chunks for {record.object_id}")
+                    logger.debug(f"Upserted {len(chunks_to_write)} chunks into af_collab_embeddings for {record.object_id}")
 
                 state_query = """
                 INSERT INTO embedding_collab_index_state (object_id, workspace_id, indexed_at, tokens_indexed)
                 VALUES ($1, $2, NOW(), $3)
                 ON CONFLICT (object_id)
                 DO UPDATE SET indexed_at = NOW(), tokens_indexed = $3;
-                 """ # Simplified update, just set tokens_indexed
-                # Note: Original Rust code incremented tokens, but state might be inconsistent in batch mode
-                # It's safer to just set the token count based on the latest successful batch run.
-
+                 """
                 await conn.execute(state_query, record.object_id, record.workspace_id, record.tokens_used)
-                logger.info(f"Successfully wrote embeddings for {record.object_id}, tokens: {record.tokens_used}")
+                logger.info(f"Successfully wrote embeddings to af_collab_embeddings and updated state for {record.object_id}, tokens: {record.tokens_used}")
 
             except Exception as e:
                 logger.exception(f"Database transaction failed for {record.object_id}: {e}")
-                raise # Re-raise to signal failure
+                raise
 
 # --- Main Processing Logic ---
 
