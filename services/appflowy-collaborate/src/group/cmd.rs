@@ -24,6 +24,11 @@ use uuid::Uuid;
 use yrs::updates::encoder::Encode;
 use yrs::StateVector;
 
+use chrono::Utc;
+use std::io::Write;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
+
 /// Using [GroupCommand] to interact with the group
 /// - HandleClientCollabMessage: Handle the client message
 /// - EncodeCollab: Encode the collab
@@ -204,6 +209,35 @@ where
       trace!("The client stream: {} is not found, it should be created when the client is connected with this websocket server", user);
       return Ok(());
     }
+
+    let timestamp = Utc::now().to_rfc3339();
+    let user_id = user.uid;
+    let doc_id_str = object_id.to_string();
+
+    let log_entry = format!("{},{},{}\n", timestamp, user_id, doc_id_str);
+
+    // Spawn a blocking task for file I/O
+    tokio::task::spawn_blocking(move || {
+        // NOTE: Ensure the file path is correct and the process has write permissions.
+        // Consider error handling and a configurable path for production.
+        const LOG_FILE_PATH: &str = "/tmp/appflowy_edits.csv"; // Or your desired path
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(LOG_FILE_PATH)
+        {
+            Ok(mut file) => {
+                // Use blocking write inside spawn_blocking
+                if let Err(e) = file.write_all(log_entry.as_bytes()) {
+                    // Use standard error logging within the blocking task
+                    eprintln!("[Edit Log Error] Failed to write to {}: {}", LOG_FILE_PATH, e);
+                }
+            }
+            Err(e) => {
+                 eprintln!("[Edit Log Error] Failed to open {}: {}", LOG_FILE_PATH, e);
+            }
+        }
+    });
 
     let is_group_exist = self.group_manager.contains_group(&object_id);
     if is_group_exist {
