@@ -9,6 +9,8 @@ use client_api_entity::workspace_dto::TrashSectionItems;
 use client_api_entity::workspace_dto::{FolderView, QueryWorkspaceFolder, QueryWorkspaceParam};
 use client_api_entity::AuthProvider;
 use client_api_entity::CollabType;
+use client_api_entity::GetInvitationCodeInfoQuery;
+use client_api_entity::InvitationCodeInfo;
 use client_api_entity::InvitedWorkspace;
 use client_api_entity::JoinWorkspaceByInviteCodeParams;
 use client_api_entity::WorkspaceInviteCodeParams;
@@ -814,6 +816,22 @@ impl Client {
     process_response_data::<InvitedWorkspace>(resp).await
   }
 
+  pub async fn get_invitation_code_info(
+    &self,
+    invitation_code: &str,
+  ) -> Result<InvitationCodeInfo, AppResponseError> {
+    let url = format!("{}/api/invite-code-info", self.base_url);
+    let resp = self
+      .http_client_with_auth(Method::GET, &url)
+      .await?
+      .query(&GetInvitationCodeInfoQuery {
+        code: invitation_code.to_string(),
+      })
+      .send()
+      .await?;
+    process_response_data::<InvitationCodeInfo>(resp).await
+  }
+
   pub async fn create_workspace_invitation_code(
     &self,
     workspace_id: &Uuid,
@@ -830,6 +848,38 @@ impl Client {
       .send()
       .await?;
     process_response_data::<WorkspaceInviteCode>(resp).await
+  }
+
+  pub async fn get_workspace_invitation_code(
+    &self,
+    workspace_id: &Uuid,
+  ) -> Result<WorkspaceInviteCode, AppResponseError> {
+    let url = format!(
+      "{}/api/workspace/{}/invite-code",
+      self.base_url, workspace_id
+    );
+    let resp = self
+      .http_client_with_auth(Method::GET, &url)
+      .await?
+      .send()
+      .await?;
+    process_response_data::<WorkspaceInviteCode>(resp).await
+  }
+
+  pub async fn delete_workspace_invitation_code(
+    &self,
+    workspace_id: &Uuid,
+  ) -> Result<(), AppResponseError> {
+    let url = format!(
+      "{}/api/workspace/{}/invite-code",
+      self.base_url, workspace_id
+    );
+    let resp = self
+      .http_client_with_auth(Method::DELETE, &url)
+      .await?
+      .send()
+      .await?;
+    process_response_error(resp).await
   }
 
   #[instrument(level = "info", skip_all, err)]
@@ -1285,12 +1335,4 @@ fn extract_request_id(resp: &reqwest::Response) -> Option<String> {
     .headers()
     .get("x-request-id")
     .map(|v| v.to_str().unwrap_or("invalid").to_string())
-}
-
-pub(crate) fn log_request_id(resp: &reqwest::Response) {
-  if let Some(request_id) = resp.headers().get("x-request-id") {
-    info!("request_id: {:?}", request_id);
-  } else {
-    debug!("request_id: not found");
-  }
 }

@@ -645,7 +645,7 @@ pub struct AFUserProfile {
   pub updated_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AFWorkspace {
   pub workspace_id: Uuid,
   pub database_storage_id: Uuid,
@@ -718,6 +718,7 @@ pub struct AFWorkspaceMember {
   pub email: String,
   pub role: AFRole,
   pub avatar_url: Option<String>,
+  pub joined_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -854,9 +855,16 @@ pub struct AFWebUser {
   pub avatar_url: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AFWebUserWithObfuscatedName {
+  pub uuid: Uuid,
+  pub name: String,
+  pub avatar_url: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GlobalComment {
-  pub user: Option<AFWebUser>,
+  pub user: Option<AFWebUserWithObfuscatedName>,
   pub created_at: DateTime<Utc>,
   pub last_updated_at: DateTime<Utc>,
   pub content: String,
@@ -885,7 +893,7 @@ pub struct Reactions {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Reaction {
   pub reaction_type: String,
-  pub react_users: Vec<AFWebUser>,
+  pub react_users: Vec<AFWebUserWithObfuscatedName>,
   pub comment_id: Uuid,
 }
 
@@ -1239,12 +1247,28 @@ pub struct WorkspaceInviteCodeParams {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct WorkspaceInviteToken {
-  pub code: String,
+  pub code: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InvitedWorkspace {
   pub workspace_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GetInvitationCodeInfoQuery {
+  pub code: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct InvitationCodeInfo {
+  pub workspace_id: Uuid,
+  pub workspace_name: String,
+  pub owner_avatar: Option<String>,
+  pub owner_name: String,
+  pub workspace_icon_url: Option<String>,
+  pub is_member: Option<bool>,
+  pub member_count: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

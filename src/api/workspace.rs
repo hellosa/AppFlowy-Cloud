@@ -10,17 +10,19 @@ use crate::biz::user::user_verify::verify_token;
 use crate::biz::workspace;
 use crate::biz::workspace::duplicate::duplicate_view_tree_and_collab;
 use crate::biz::workspace::invite::{
-  generate_workspace_invite_token, join_workspace_invite_by_code,
+  delete_workspace_invite_code, generate_workspace_invite_token, get_invite_code_for_workspace,
+  join_workspace_invite_by_code,
 };
 use crate::biz::workspace::ops::{
   create_comment_on_published_view, create_reaction_on_comment, get_comments_on_published_view,
   get_reactions_on_published_view, remove_comment_on_published_view, remove_reaction_on_comment,
 };
 use crate::biz::workspace::page_view::{
-  add_recent_pages, append_block_at_the_end_of_page, create_database_view, create_page,
-  create_space, delete_all_pages_from_trash, delete_trash, favorite_page, get_page_view_collab,
-  move_page, move_page_to_trash, publish_page, reorder_favorite_page, restore_all_pages_from_trash,
-  restore_page_from_trash, unpublish_page, update_page, update_page_collab_data, update_space,
+  add_recent_pages, append_block_at_the_end_of_page, create_database_view, create_folder_view,
+  create_page, create_space, delete_all_pages_from_trash, delete_trash, favorite_page,
+  get_page_view_collab, move_page, move_page_to_trash, publish_page, reorder_favorite_page,
+  restore_all_pages_from_trash, restore_page_from_trash, unpublish_page, update_page,
+  update_page_collab_data, update_space,
 };
 use crate::biz::workspace::publish::get_workspace_default_publish_view_info_meta;
 use crate::biz::workspace::quick_note::{
@@ -37,7 +39,9 @@ use actix_web::{web, HttpResponse, ResponseError, Scope};
 use actix_web::{HttpRequest, Result};
 use anyhow::{anyhow, Context};
 use app_error::{AppError, ErrorCode};
-use appflowy_collaborate::actix_ws::entities::{ClientHttpStreamMessage, ClientHttpUpdateMessage};
+use appflowy_collaborate::actix_ws::entities::{
+  ClientGenerateEmbeddingMessage, ClientHttpStreamMessage, ClientHttpUpdateMessage,
+};
 use authentication::jwt::{Authorization, OptionalUserUuid, UserUuid};
 use bytes::BytesMut;
 use chrono::{DateTime, Duration, Utc};
@@ -170,12 +174,19 @@ pub fn workspace_scope() -> Scope {
         .route(web::get().to(get_collab_embed_info_handler)),
     )
     .service(
+      web::resource("/{workspace_id}/collab/{object_id}/generate-embedding")
+          .route(web::get().to(force_generate_collab_embedding_handler)),
+    )
+    .service(
       web::resource("/{workspace_id}/collab/embed-info/list")
         .route(web::post().to(batch_get_collab_embed_info_handler)),
     )
     .service(web::resource("/{workspace_id}/space").route(web::post().to(post_space_handler)))
     .service(
       web::resource("/{workspace_id}/space/{view_id}").route(web::patch().to(update_space_handler)),
+    )
+    .service(
+      web::resource("/{workspace_id}/folder-view").route(web::post().to(post_folder_view_handler)),
     )
     .service(
       web::resource("/{workspace_id}/page-view").route(web::post().to(post_page_view_handler)),
@@ -365,6 +376,8 @@ pub fn workspace_scope() -> Scope {
     )
     .service(
       web::resource("/{workspace_id}/invite-code")
+        .route(web::get().to(get_workspace_invite_code_handler))
+        .route(web::delete().to(delete_workspace_invite_code_handler))
         .route(web::post().to(post_workspace_invite_code_handler)),
     )
 }
@@ -565,7 +578,7 @@ async fn post_join_workspace_invite_by_code_handler(
   )
 }
 
-#[instrument(skip_all, err, fields(user_uuid))]
+#[instrument(level = "trace", skip_all, err, fields(user_uuid))]
 async fn get_workspace_settings_handler(
   user_uuid: UserUuid,
   state: Data<AppState>,
@@ -620,7 +633,8 @@ async fn get_workspace_members_handler(
       name: member.name,
       email: member.email,
       role: member.role,
-      avatar_url: None,
+      avatar_url: member.avatar_url,
+      joined_at: member.created_at,
     })
     .collect();
 
@@ -686,7 +700,8 @@ async fn get_workspace_member_handler(
     name: member_row.name,
     email: member_row.email,
     role: member_row.role,
-    avatar_url: None,
+    avatar_url: member_row.avatar_url,
+    joined_at: member_row.created_at,
   };
 
   Ok(AppResponse::Ok().with_data(member).into())
@@ -722,7 +737,8 @@ async fn get_workspace_member_v1_handler(
     name: member_row.name,
     email: member_row.email,
     role: member_row.role,
-    avatar_url: None,
+    avatar_url: member_row.avatar_url,
+    joined_at: member_row.created_at,
   };
 
   Ok(AppResponse::Ok().with_data(member).into())
@@ -1239,6 +1255,32 @@ async fn update_space_handler(
   )
   .await?;
   Ok(Json(AppResponse::Ok()))
+}
+
+async fn post_folder_view_handler(
+  user_uuid: UserUuid,
+  path: web::Path<Uuid>,
+  payload: Json<CreateFolderViewParams>,
+  state: Data<AppState>,
+  server: Data<RealtimeServerAddr>,
+  req: HttpRequest,
+) -> Result<Json<AppResponse<Page>>> {
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let workspace_uuid = path.into_inner();
+  let user = realtime_user_for_web_request(req.headers(), uid)?;
+  let page = create_folder_view(
+    &state.metrics.appflowy_web_metrics,
+    server,
+    user,
+    &state.collab_access_control_storage,
+    workspace_uuid,
+    &payload.parent_view_id,
+    payload.layout.clone(),
+    payload.name.as_deref(),
+    payload.view_id,
+  )
+  .await?;
+  Ok(Json(AppResponse::Ok().with_data(page)))
 }
 
 async fn post_page_view_handler(
@@ -2712,6 +2754,20 @@ async fn get_collab_embed_info_handler(
   Ok(Json(AppResponse::Ok().with_data(info)))
 }
 
+async fn force_generate_collab_embedding_handler(
+  path: web::Path<(Uuid, Uuid)>,
+  server: Data<RealtimeServerAddr>,
+) -> Result<Json<AppResponse<()>>> {
+  let (workspace_id, object_id) = path.into_inner();
+  let request = ClientGenerateEmbeddingMessage {
+    workspace_id,
+    object_id,
+    return_tx: None,
+  };
+  let _ = server.try_send(request);
+  Ok(Json(AppResponse::Ok()))
+}
+
 #[instrument(level = "debug", skip_all)]
 async fn batch_get_collab_embed_info_handler(
   state: Data<AppState>,
@@ -2824,6 +2880,7 @@ async fn collab_full_sync_handler(
       let encoded = tokio::task::spawn_blocking(move || zstd::encode_all(Cursor::new(data), 3))
         .await
         .map_err(|err| AppError::Internal(anyhow!("Failed to compress data: {}", err)))??;
+
       Ok(HttpResponse::Ok().body(encoded))
     },
     Ok(None) => Ok(HttpResponse::InternalServerError().finish()),
@@ -2906,6 +2963,38 @@ async fn delete_quick_note_handler(
     .await?;
   delete_quick_note(&state.pg_pool, quick_note_id).await?;
   Ok(Json(AppResponse::Ok()))
+}
+
+async fn delete_workspace_invite_code_handler(
+  user_uuid: UserUuid,
+  path_param: web::Path<Uuid>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let workspace_id = path_param.into_inner();
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  state
+    .workspace_access_control
+    .enforce_role(&uid, &workspace_id, AFRole::Owner)
+    .await?;
+  delete_workspace_invite_code(&state.pg_pool, &workspace_id).await?;
+  Ok(Json(AppResponse::Ok()))
+}
+
+async fn get_workspace_invite_code_handler(
+  user_uuid: UserUuid,
+  path_param: web::Path<Uuid>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<WorkspaceInviteToken>> {
+  let workspace_id = path_param.into_inner();
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  state
+    .workspace_access_control
+    .enforce_role(&uid, &workspace_id, AFRole::Member)
+    .await?;
+  let code = get_invite_code_for_workspace(&state.pg_pool, &workspace_id).await?;
+  Ok(Json(
+    AppResponse::Ok().with_data(WorkspaceInviteToken { code }),
+  ))
 }
 
 async fn post_workspace_invite_code_handler(
