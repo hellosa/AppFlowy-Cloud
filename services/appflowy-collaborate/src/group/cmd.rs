@@ -19,15 +19,10 @@ use collab_rt_entity::{
 };
 use collab_rt_protocol::{Message, SyncMessage};
 use database::collab::CollabStorage;
-use tracing::{error, instrument, trace, warn};
+use tracing::{error, info, instrument, trace, warn};
 use uuid::Uuid;
 use yrs::updates::encoder::Encode;
 use yrs::StateVector;
-
-use chrono::Utc;
-use std::io::Write;
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
 
 /// Using [GroupCommand] to interact with the group
 /// - HandleClientCollabMessage: Handle the client message
@@ -210,35 +205,6 @@ where
       return Ok(());
     }
 
-    let timestamp = Utc::now().to_rfc3339();
-    let user_id = user.uid;
-    let doc_id_str = object_id.to_string();
-
-    let log_entry = format!("{},{},{}\n", timestamp, user_id, doc_id_str);
-
-    // Spawn a blocking task for file I/O
-    tokio::task::spawn_blocking(move || {
-        // NOTE: Ensure the file path is correct and the process has write permissions.
-        // Consider error handling and a configurable path for production.
-        const LOG_FILE_PATH: &str = "/tmp/appflowy_edits.csv"; // Or your desired path
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(LOG_FILE_PATH)
-        {
-            Ok(mut file) => {
-                // Use blocking write inside spawn_blocking
-                if let Err(e) = file.write_all(log_entry.as_bytes()) {
-                    // Use standard error logging within the blocking task
-                    eprintln!("[Edit Log Error] Failed to write to {}: {}", LOG_FILE_PATH, e);
-                }
-            }
-            Err(e) => {
-                 eprintln!("[Edit Log Error] Failed to open {}: {}", LOG_FILE_PATH, e);
-            }
-        }
-    });
-
     let is_group_exist = self.group_manager.contains_group(&object_id);
     if is_group_exist {
       // subscribe the user to the group. then the user will receive the changes from the group
@@ -337,6 +303,15 @@ where
       if let Err(err) = err {
         warn!("Send user:{} http update message to group:{}", user, err);
         self.msg_router_by_user.remove(user);
+      } else {
+        // Log user modification via HTTP update
+        info!(
+          user_id = user.uid,
+          device_id = %user.device_id,
+          object_id = %object_id,
+          source = "http",
+          "User modified object"
+        );
       }
     } else {
       warn!(
@@ -483,6 +458,16 @@ pub async fn forward_message_to_group(
     if let Err(err) = err {
       warn!("Send user:{} message to group:{}", user.uid, err);
       client_msg_router.remove(user);
+    } else {
+      // Log user modification via WebSocket message
+      info!(
+        user_id = user.uid,
+        device_id = %user.device_id,
+        object_id = %object_id,
+        source = "websocket",
+        message_count = message.1.len(), // Log how many messages were forwarded
+        "User modified object"
+      );
     }
   }
 }
