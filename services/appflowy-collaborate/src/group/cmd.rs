@@ -453,6 +453,10 @@ pub async fn forward_message_to_group(
         .map(|v| v.msg_id())
         .collect::<Vec<_>>()
     );
+    
+    // 先获取消息数量
+    let message_count = collab_messages.len();
+    
     let message = MessageByObjectId::new_with_message(object_id.to_string(), collab_messages);
     let err = client_stream.stream_tx.send(message);
     if let Err(err) = err {
@@ -465,7 +469,7 @@ pub async fn forward_message_to_group(
         device_id = %user.device_id,
         object_id = %object_id,
         source = "websocket",
-        message_count = collab_messages.len(), // 直接使用传入的collab_messages的长度
+        message_count = message_count, // 使用之前保存的值
         "User modified object"
       );
     }
