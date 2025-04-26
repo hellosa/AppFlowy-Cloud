@@ -465,7 +465,7 @@ pub async fn forward_message_to_group(
         device_id = %user.device_id,
         object_id = %object_id,
         source = "websocket",
-        message_count = message.1.len(), // Log how many messages were forwarded
+        message_count = collab_messages.len(), // 直接使用传入的collab_messages的长度
         "User modified object"
       );
     }
