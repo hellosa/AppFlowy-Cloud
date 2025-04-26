@@ -304,13 +304,13 @@ where
         warn!("Send user:{} http update message to group:{}", user, err);
         self.msg_router_by_user.remove(user);
       } else {
-        // Log user modification via HTTP update
+        // HTTP更新是实际内容修改
         info!(
           user_id = user.uid,
           device_id = %user.device_id,
           object_id = %object_id,
           source = "http",
-          "User modified object"
+          "User modified object content"
         );
       }
     } else {
@@ -454,7 +454,8 @@ pub async fn forward_message_to_group(
         .collect::<Vec<_>>()
     );
     
-    // 先获取消息数量
+    // 检查是否包含内容更新消息
+    let has_update_sync = collab_messages.iter().any(|msg| msg.is_update_sync());
     let message_count = collab_messages.len();
     
     let message = MessageByObjectId::new_with_message(object_id.to_string(), collab_messages);
@@ -462,15 +463,15 @@ pub async fn forward_message_to_group(
     if let Err(err) = err {
       warn!("Send user:{} message to group:{}", user.uid, err);
       client_msg_router.remove(user);
-    } else {
-      // Log user modification via WebSocket message
+    } else if has_update_sync {
+      // 只有当消息包含实际内容更新时才记录日志
       info!(
         user_id = user.uid,
         device_id = %user.device_id,
         object_id = %object_id,
         source = "websocket",
-        message_count = message_count, // 使用之前保存的值
-        "User modified object"
+        message_count = message_count,
+        "User modified object content"
       );
     }
   }
