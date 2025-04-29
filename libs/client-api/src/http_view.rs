@@ -228,7 +228,7 @@ impl Client {
     &self,
     workspace_id: Uuid,
     view_id: &Uuid,
-    user_id: &Uuid,
+    user_id: &i64,
   ) -> Result<PageCollab, AppResponseError> {
     let url = format!(
       "{}/api/workspace/{}/page-view/{}/noauth/{}",

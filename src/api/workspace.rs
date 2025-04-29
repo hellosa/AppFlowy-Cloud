@@ -1721,7 +1721,7 @@ async fn get_page_view_handler(
 }
 
 async fn get_page_view_noauth_handler(
-  path: web::Path<(Uuid, Uuid, Uuid)>,
+  path: web::Path<(Uuid, Uuid, i64)>,
   state: Data<AppState>,
 ) -> Result<Json<AppResponse<PageCollab>>> {
   let (workspace_uuid, view_id, user_id) = path.into_inner();
