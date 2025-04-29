@@ -81,7 +81,10 @@ use tracing::{error, event, instrument, trace};
 use uuid::Uuid;
 use validator::Validate;
 use workspace_template::document::parser::SerdeBlock;
-use shared_entity::dto::workspace_dto::{PageCollabData, AFWebUser, FolderView};
+use shared_entity::dto::workspace_dto::{
+  PageCollabData, FolderView, PageCollab, Page, Space, WorkspaceFolder, PublishedView,
+  FavoriteSectionItems, TrashSectionItems, RecentSectionItems
+};
 
 pub const WORKSPACE_ID_PATH: &str = "workspace_id";
 pub const COLLAB_OBJECT_ID_PATH: &str = "object_id";
@@ -1727,7 +1730,7 @@ async fn get_page_view_noauth_handler(
 ) -> Result<Json<AppResponse<PageCollab>>> {
   let (workspace_uuid, view_id) = path.into_inner();
 
-  // 使用更通用的SQLx查询方法，避免离线模式的问题
+  // 使用带有错误处理的方式进行查询
   let view = sqlx::query_as::<_, (Uuid, String, String, Option<serde_json::Value>, Option<serde_json::Value>, Option<chrono::DateTime<chrono::Utc>>, Option<i64>, Option<i64>, Option<chrono::DateTime<chrono::Utc>>, Option<bool>, Option<bool>, Option<serde_json::Value>)>(
     r#"
     SELECT 
@@ -1750,7 +1753,8 @@ async fn get_page_view_noauth_handler(
   .bind(view_id)
   .bind(workspace_uuid)
   .fetch_optional(&state.pg_pool)
-  .await?
+  .await
+  .map_err(|e| AppError::Internal(anyhow::anyhow!("Database error: {}", e)))?
   .ok_or(AppError::RecordNotFound(format!("View {} not found", view_id)))?;
 
   // 解构查询结果
@@ -1767,33 +1771,16 @@ async fn get_page_view_noauth_handler(
   .bind(view_id)
   .bind(workspace_uuid)
   .fetch_one(&state.pg_pool)
-  .await?
+  .await
+  .map_err(|e| AppError::Internal(anyhow::anyhow!("Database error: {}", e)))?
   .0;
 
   // 获取创建者信息
   let owner = match created_by {
     Some(uid) => {
-      let user = sqlx::query_as::<_, (i64, Option<String>, String, Option<String>)>(
-        r#"
-        SELECT 
-          uid,
-          name,
-          email,
-          avatar_url
-        FROM af_user
-        WHERE uid = $1
-        "#,
-      )
-      .bind(uid)
-      .fetch_optional(&state.pg_pool)
-      .await?;
-      
-      user.map(|(uid, name, email, avatar_url)| AFWebUser {
-        uid,
-        name,
-        email,
-        avatar_url,
-      })
+      // 使用已经在项目中使用的helper函数来获取用户信息
+      biz::user::select_web_user_from_uid(&state.pg_pool, uid).await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Error fetching user: {}", e)))?
     },
     None => None,
   };
@@ -1801,27 +1788,9 @@ async fn get_page_view_noauth_handler(
   // 获取最后编辑者信息
   let last_editor = match last_edited_by {
     Some(uid) => {
-      let user = sqlx::query_as::<_, (i64, Option<String>, String, Option<String>)>(
-        r#"
-        SELECT 
-          uid,
-          name,
-          email,
-          avatar_url
-        FROM af_user
-        WHERE uid = $1
-        "#,
-      )
-      .bind(uid)
-      .fetch_optional(&state.pg_pool)
-      .await?;
-      
-      user.map(|(uid, name, email, avatar_url)| AFWebUser {
-        uid,
-        name,
-        email,
-        avatar_url,
-      })
+      // 使用已经在项目中使用的helper函数来获取用户信息
+      biz::user::select_web_user_from_uid(&state.pg_pool, uid).await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Error fetching user: {}", e)))?
     },
     None => None,
   };
@@ -1840,7 +1809,8 @@ async fn get_page_view_noauth_handler(
     .bind(view_id)
     .bind(workspace_uuid)
     .fetch_optional(&state.pg_pool)
-    .await?;
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Database error: {}", e)))?;
 
     match collab_json {
       Some(json) => {
