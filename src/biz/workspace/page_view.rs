@@ -2565,7 +2565,7 @@ async fn get_page_collab_data_for_database_noauth(
 
   // 修复函数调用参数顺序
   let database_data =
-    get_latest_collab_database_body(workspace_id, db_oid_uuid, collab_access_control_storage, &GetCollabOrigin::Server)
+    get_latest_collab_database_body(collab_access_control_storage, workspace_id, db_oid_uuid)
       .await?;
   let data = serde_json::to_value(&database_data).map_err(|err| {
     AppError::Internal(anyhow::anyhow!(
