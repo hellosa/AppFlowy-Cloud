@@ -19,10 +19,9 @@ use crate::biz::workspace::ops::{
 };
 use crate::biz::workspace::page_view::{
   add_recent_pages, append_block_at_the_end_of_page, create_database_view, create_folder_view,
-  create_page, create_space, delete_all_pages_from_trash, delete_trash, favorite_page,
-  get_page_view_collab, move_page, move_page_to_trash, publish_page, reorder_favorite_page,
-  restore_all_pages_from_trash, restore_page_from_trash, unpublish_page, update_page,
-  update_page_collab_data, update_space,
+  create_page, create_page_with_block, delete_all_pages_from_trash, delete_trash,
+  duplicate_document, favorite_page, get_page_view_collab, move_page, move_page_to_trash,
+  publish_page, restore_all_pages_from_trash, restore_page_from_trash, unpublish_page, update_page,
 };
 use crate::biz::workspace::publish::get_workspace_default_publish_view_info_meta;
 use crate::biz::workspace::quick_note::{
@@ -81,10 +80,6 @@ use tracing::{error, event, instrument, trace};
 use uuid::Uuid;
 use validator::Validate;
 use workspace_template::document::parser::SerdeBlock;
-use shared_entity::dto::workspace_dto::{
-  PageCollabData, FolderView, PageCollab, Page, Space, WorkspaceFolder, PublishedView,
-  FavoriteSectionItems, TrashSectionItems, RecentSectionItems
-};
 
 pub const WORKSPACE_ID_PATH: &str = "workspace_id";
 pub const COLLAB_OBJECT_ID_PATH: &str = "object_id";
@@ -387,6 +382,10 @@ pub fn workspace_scope() -> Scope {
         .route(web::get().to(get_workspace_invite_code_handler))
         .route(web::delete().to(delete_workspace_invite_code_handler))
         .route(web::post().to(post_workspace_invite_code_handler)),
+    )
+    .service(
+      web::resource("/page-view/{view_id}/noauth")
+        .route(web::get().to(get_page_view_simple_noauth_handler)),
     )
 }
 
@@ -1730,140 +1729,84 @@ async fn get_page_view_noauth_handler(
 ) -> Result<Json<AppResponse<PageCollab>>> {
   let (workspace_uuid, view_id) = path.into_inner();
 
-  // 使用带有错误处理的方式进行查询
-  let view = sqlx::query_as::<_, (Uuid, String, String, Option<serde_json::Value>, Option<serde_json::Value>, Option<chrono::DateTime<chrono::Utc>>, Option<i64>, Option<i64>, Option<chrono::DateTime<chrono::Utc>>, Option<bool>, Option<bool>, Option<serde_json::Value>)>(
-    r#"
-    SELECT 
-      v.view_id,
-      v.parent_view_id,
-      v.name,
-      v.icon,
-      v.layout,
-      v.created_at,
-      v.created_by,
-      v.last_edited_by,
-      v.last_edited_time,
-      v.is_favorite,
-      v.is_locked,
-      v.extra
-    FROM af_view v
-    WHERE v.view_id = $1 AND v.workspace_id = $2
-    "#,
+  // 使用系统用户ID来获取页面数据，绕过认证
+  let system_uid = 1; // 使用系统用户ID，根据实际情况可能需要调整
+  
+  let page_collab = get_page_view_collab(
+    &state.pg_pool,
+    &state.collab_access_control_storage,
+    system_uid,
+    workspace_uuid,
+    view_id,
   )
-  .bind(view_id)
-  .bind(workspace_uuid)
+  .await?;
+  Ok(Json(AppResponse::Ok().with_data(page_collab)))
+}
+
+async fn get_page_view_simple_noauth_handler(
+  view_id: web::Path<Uuid>,
+  state: Data<AppState>,
+) -> Result<Json<AppResponse<SimplePageView>>> {
+  let view_id = view_id.into_inner();
+  
+  // 尝试找到视图所在的工作区
+  let workspace_query = sqlx::query!(
+    r#"
+    SELECT workspace_id 
+    FROM af_published_collab
+    WHERE view_id = $1
+    "#,
+    view_id
+  )
   .fetch_optional(&state.pg_pool)
   .await
-  .map_err(|e| AppError::Internal(anyhow::anyhow!("Database error: {}", e)))?
-  .ok_or(AppError::RecordNotFound(format!("View {} not found", view_id)))?;
-
-  // 解构查询结果
-  let (_, parent_view_id_str, name, icon, layout, created_at, created_by, last_edited_by, last_edited_time, is_favorite, is_locked, extra) = view;
-
-  // 检查是否已发布
-  let is_published = sqlx::query_as::<_, (bool,)>(
-    r#"
-    SELECT COUNT(*) > 0 as is_published
-    FROM af_published_collab
-    WHERE view_id = $1 AND workspace_id = $2 AND unpublished_at IS NULL
-    "#,
-  )
-  .bind(view_id)
-  .bind(workspace_uuid)
-  .fetch_one(&state.pg_pool)
-  .await
-  .map_err(|e| AppError::Internal(anyhow::anyhow!("Database error: {}", e)))?
-  .0;
-
-  // 获取创建者信息
-  let owner = match created_by {
-    Some(uid) => {
-      // 使用已经在项目中使用的helper函数来获取用户信息
-      biz::user::select_web_user_from_uid(&state.pg_pool, uid).await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Error fetching user: {}", e)))?
-    },
-    None => None,
-  };
-
-  // 获取最后编辑者信息
-  let last_editor = match last_edited_by {
-    Some(uid) => {
-      // 使用已经在项目中使用的helper函数来获取用户信息
-      biz::user::select_web_user_from_uid(&state.pg_pool, uid).await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Error fetching user: {}", e)))?
-    },
-    None => None,
-  };
-
-  // 获取文档内容
-  let layout_str = layout.as_ref().and_then(|l| l.as_str()).unwrap_or("");
-  let collab_doc = if layout_str.contains("Document") {
-    // 我们只需要获取文档的原始JSON内容，无需权限检查
-    let collab_json: Option<serde_json::Value> = sqlx::query_scalar(
-      r#"
-      SELECT data
-      FROM af_collab
-      WHERE object_id = $1 AND workspace_id = $2
-      "#,
-    )
-    .bind(view_id)
-    .bind(workspace_uuid)
-    .fetch_optional(&state.pg_pool)
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("Database error: {}", e)))?;
-
-    match collab_json {
-      Some(json) => {
-        PageCollabData::Document {
-          collab: json,
-        }
-      },
-      None => PageCollabData::Document {
-        collab: serde_json::json!({}),
-      },
-    }
-  } else if layout_str.contains("Grid") || layout_str.contains("Board") || layout_str.contains("Calendar") {
-    // 数据库视图处理需要更复杂的逻辑，这里我们简化处理
-    PageCollabData::Database {
-      fields: vec![],
-      field_settings: serde_json::json!({}),
-      rows: vec![],
-      grouped_rows: None,
-    }
+  .map_err(|e| AppError::Internal(anyhow::anyhow!("查询工作区失败: {}", e)))?;
+  
+  let workspace_id = if let Some(row) = workspace_query {
+    row.workspace_id
   } else {
-    return Err(AppError::InvalidRequest("Unsupported view layout".to_string()).into());
+    // 如果不是已发布的视图，可能需要通过其他方式找到它所属的工作区
+    // 或者直接返回错误
+    return Err(AppError::RecordNotFound(format!("找不到视图的工作区: {}", view_id)).into());
   };
-
-  // 构建返回数据
-  let parent_view_id = Uuid::parse_str(&parent_view_id_str).ok();
-  let folder_view = FolderView {
-    view_id,
-    parent_view_id,
-    prev_view_id: None, // 简化处理
-    name,
-    icon: icon.map(|i| serde_json::from_value(i).unwrap_or_default()),
-    is_space: false, // 简化处理
-    is_private: false,
-    is_favorite: is_favorite.unwrap_or(false),
-    is_published,
-    layout: layout.map(|l| serde_json::from_value(l).unwrap_or_default()).unwrap_or_default(),
-    created_at: created_at.unwrap_or_default(),
-    created_by,
-    last_edited_by,
-    last_edited_time: last_edited_time.unwrap_or_default(),
-    is_locked: is_locked.unwrap_or(false),
-    extra: extra.map(|e| serde_json::from_value(e).unwrap_or_default()),
-    children: vec![],
+  
+  // 使用服务器权限而不是用户权限获取folder
+  let folder = get_latest_collab_folder(
+    &state.collab_access_control_storage,
+    GetCollabOrigin::Server,
+    workspace_id,
+  )
+  .await
+  .map_err(|e| AppError::Internal(anyhow::anyhow!("获取folder数据失败: {}", e)))?;
+  
+  let view = folder
+    .get_view(&view_id.to_string())
+    .ok_or(AppError::InvalidFolderView(format!(
+      "View {} not found",
+      view_id
+    )))?;
+    
+  let last_editor_name = if let Some(last_edited_by) = view.last_edited_by {
+    let user = sqlx::query!("SELECT name FROM af_user WHERE uid = $1", last_edited_by)
+      .fetch_optional(&state.pg_pool)
+      .await
+      .map_err(|e| AppError::Internal(anyhow::anyhow!("获取用户数据失败: {}", e)))?;
+    
+    user.map(|u| u.name)
+  } else {
+    None
   };
-
-  let page_collab = PageCollab {
-    view: folder_view,
-    data: collab_doc,
-    owner,
-    last_editor,
+  
+  let last_edited_time = chrono::DateTime::from_timestamp(view.last_edited_time, 0)
+    .map(|dt| dt.with_timezone(&chrono::Utc));
+  
+  let page_view = SimplePageView {
+    view_name: view.name.clone(),
+    last_edited_time,
+    last_editor_name,
   };
-
-  Ok(Json(AppResponse::Ok().with_data(page_collab)))
+  
+  Ok(Json(AppResponse::Ok().with_data(page_view)))
 }
 
 async fn favorite_page_view_handler(
@@ -3163,4 +3106,11 @@ async fn post_workspace_invite_code_handler(
     generate_workspace_invite_token(&state.pg_pool, &workspace_id, data.validity_period_hours)
       .await?;
   Ok(Json(AppResponse::Ok().with_data(workspace_invite_link)))
+}
+
+#[derive(serde::Serialize)]
+struct SimplePageView {
+  view_name: String,
+  last_edited_time: Option<chrono::DateTime<chrono::Utc>>,
+  last_editor_name: Option<String>,
 }

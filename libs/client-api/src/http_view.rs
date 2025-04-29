@@ -8,8 +8,17 @@ use reqwest::Method;
 use serde_json::json;
 use shared_entity::response::AppResponseError;
 use uuid::Uuid;
+use serde::{Serialize, Deserialize};
+use chrono::{DateTime, Utc};
 
 use crate::{process_response_data, process_response_error, Client};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SimplePageView {
+  pub view_name: String,
+  pub last_edited_time: Option<DateTime<Utc>>,
+  pub last_editor_name: Option<String>,
+}
 
 impl Client {
   pub async fn create_folder_view(
@@ -239,6 +248,22 @@ impl Client {
       .send()
       .await?;
     process_response_data::<PageCollab>(resp).await
+  }
+
+  pub async fn get_page_view_simple_noauth(
+    &self,
+    view_id: &Uuid,
+  ) -> Result<SimplePageView, AppResponseError> {
+    let url = format!(
+      "{}/api/page-view/{}/noauth",
+      self.base_url, view_id
+    );
+    let resp = self
+      .http_client(Method::GET, &url)
+      .await?
+      .send()
+      .await?;
+    process_response_data::<SimplePageView>(resp).await
   }
 
   pub async fn publish_page(
