@@ -224,6 +224,23 @@ impl Client {
     process_response_data::<PageCollab>(resp).await
   }
 
+  pub async fn get_workspace_page_view_noauth(
+    &self,
+    workspace_id: Uuid,
+    view_id: &Uuid,
+  ) -> Result<PageCollab, AppResponseError> {
+    let url = format!(
+      "{}/api/workspace/{}/page-view/{}/noauth",
+      self.base_url, workspace_id, view_id
+    );
+    let resp = self
+      .http_client(Method::GET, &url)
+      .await?
+      .send()
+      .await?;
+    process_response_data::<PageCollab>(resp).await
+  }
+
   pub async fn publish_page(
     &self,
     workspace_id: Uuid,
