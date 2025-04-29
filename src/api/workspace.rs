@@ -81,6 +81,7 @@ use tracing::{error, event, instrument, trace};
 use uuid::Uuid;
 use validator::Validate;
 use workspace_template::document::parser::SerdeBlock;
+use shared_entity::dto::workspace_dto::{PageCollabData, AFWebUser, FolderView};
 
 pub const WORKSPACE_ID_PATH: &str = "workspace_id";
 pub const COLLAB_OBJECT_ID_PATH: &str = "object_id";
@@ -1726,9 +1727,8 @@ async fn get_page_view_noauth_handler(
 ) -> Result<Json<AppResponse<PageCollab>>> {
   let (workspace_uuid, view_id) = path.into_inner();
 
-  // 直接使用SQL查询从数据库获取所需数据，而不通过现有函数
-  // 获取view信息
-  let view = sqlx::query!(
+  // 使用更通用的SQLx查询方法，避免离线模式的问题
+  let view = sqlx::query_as::<_, (Uuid, String, String, Option<serde_json::Value>, Option<serde_json::Value>, Option<chrono::DateTime<chrono::Utc>>, Option<i64>, Option<i64>, Option<chrono::DateTime<chrono::Utc>>, Option<bool>, Option<bool>, Option<serde_json::Value>)>(
     r#"
     SELECT 
       v.view_id,
@@ -1746,30 +1746,34 @@ async fn get_page_view_noauth_handler(
     FROM af_view v
     WHERE v.view_id = $1 AND v.workspace_id = $2
     "#,
-    view_id,
-    workspace_uuid
   )
+  .bind(view_id)
+  .bind(workspace_uuid)
   .fetch_optional(&state.pg_pool)
   .await?
   .ok_or(AppError::RecordNotFound(format!("View {} not found", view_id)))?;
 
+  // 解构查询结果
+  let (_, parent_view_id_str, name, icon, layout, created_at, created_by, last_edited_by, last_edited_time, is_favorite, is_locked, extra) = view;
+
   // 检查是否已发布
-  let is_published = sqlx::query_scalar!(
+  let is_published = sqlx::query_as::<_, (bool,)>(
     r#"
-    SELECT COUNT(*) > 0 as "is_published!"
+    SELECT COUNT(*) > 0 as is_published
     FROM af_published_collab
     WHERE view_id = $1 AND workspace_id = $2 AND unpublished_at IS NULL
     "#,
-    view_id,
-    workspace_uuid
   )
+  .bind(view_id)
+  .bind(workspace_uuid)
   .fetch_one(&state.pg_pool)
-  .await?;
+  .await?
+  .0;
 
   // 获取创建者信息
-  let owner = match view.created_by {
+  let owner = match created_by {
     Some(uid) => {
-      sqlx::query!(
+      let user = sqlx::query_as::<_, (i64, Option<String>, String, Option<String>)>(
         r#"
         SELECT 
           uid,
@@ -1779,24 +1783,25 @@ async fn get_page_view_noauth_handler(
         FROM af_user
         WHERE uid = $1
         "#,
-        uid
       )
+      .bind(uid)
       .fetch_optional(&state.pg_pool)
-      .await?
-      .map(|user| shared_entity::dto::workspace_dto::AFWebUser {
-        uid: user.uid,
-        name: user.name,
-        email: user.email,
-        avatar_url: user.avatar_url,
+      .await?;
+      
+      user.map(|(uid, name, email, avatar_url)| AFWebUser {
+        uid,
+        name,
+        email,
+        avatar_url,
       })
     },
     None => None,
   };
 
   // 获取最后编辑者信息
-  let last_editor = match view.last_edited_by {
+  let last_editor = match last_edited_by {
     Some(uid) => {
-      sqlx::query!(
+      let user = sqlx::query_as::<_, (i64, Option<String>, String, Option<String>)>(
         r#"
         SELECT 
           uid,
@@ -1806,83 +1811,82 @@ async fn get_page_view_noauth_handler(
         FROM af_user
         WHERE uid = $1
         "#,
-        uid
       )
+      .bind(uid)
       .fetch_optional(&state.pg_pool)
-      .await?
-      .map(|user| shared_entity::dto::workspace_dto::AFWebUser {
-        uid: user.uid,
-        name: user.name,
-        email: user.email,
-        avatar_url: user.avatar_url,
+      .await?;
+      
+      user.map(|(uid, name, email, avatar_url)| AFWebUser {
+        uid,
+        name,
+        email,
+        avatar_url,
       })
     },
     None => None,
   };
 
   // 获取文档内容
-  let collab_doc = match view.layout.as_deref() {
-    Some("Document") => {
-      // 我们只需要获取文档的原始JSON内容，无需权限检查
-      let collab_json = sqlx::query_scalar!(
-        r#"
-        SELECT data
-        FROM af_collab
-        WHERE object_id = $1 AND workspace_id = $2
-        "#,
-        view_id,
-        workspace_uuid
-      )
-      .fetch_optional(&state.pg_pool)
-      .await?;
+  let layout_str = layout.as_ref().and_then(|l| l.as_str()).unwrap_or("");
+  let collab_doc = if layout_str.contains("Document") {
+    // 我们只需要获取文档的原始JSON内容，无需权限检查
+    let collab_json: Option<serde_json::Value> = sqlx::query_scalar(
+      r#"
+      SELECT data
+      FROM af_collab
+      WHERE object_id = $1 AND workspace_id = $2
+      "#,
+    )
+    .bind(view_id)
+    .bind(workspace_uuid)
+    .fetch_optional(&state.pg_pool)
+    .await?;
 
-      match collab_json {
-        Some(json) => {
-          let collab_data = serde_json::from_value::<serde_json::Value>(json)?;
-          client_api_entity::workspace_dto::PageCollabData::Document {
-            collab: collab_data,
-          }
-        },
-        None => client_api_entity::workspace_dto::PageCollabData::Document {
-          collab: serde_json::json!({}),
-        },
-      }
-    },
-    Some("Grid") | Some("Board") | Some("Calendar") => {
-      // 数据库视图处理需要更复杂的逻辑，这里我们简化处理
-      client_api_entity::workspace_dto::PageCollabData::Database {
-        fields: vec![],
-        field_settings: serde_json::json!({}),
-        rows: vec![],
-        grouped_rows: None,
-      }
-    },
-    _ => return Err(AppError::InvalidRequest("Unsupported view layout".to_string()).into()),
+    match collab_json {
+      Some(json) => {
+        PageCollabData::Document {
+          collab: json,
+        }
+      },
+      None => PageCollabData::Document {
+        collab: serde_json::json!({}),
+      },
+    }
+  } else if layout_str.contains("Grid") || layout_str.contains("Board") || layout_str.contains("Calendar") {
+    // 数据库视图处理需要更复杂的逻辑，这里我们简化处理
+    PageCollabData::Database {
+      fields: vec![],
+      field_settings: serde_json::json!({}),
+      rows: vec![],
+      grouped_rows: None,
+    }
+  } else {
+    return Err(AppError::InvalidRequest("Unsupported view layout".to_string()).into());
   };
 
   // 构建返回数据
-  let parent_view_id = Uuid::parse_str(&view.parent_view_id).ok();
-  let folder_view = client_api_entity::workspace_dto::FolderView {
+  let parent_view_id = Uuid::parse_str(&parent_view_id_str).ok();
+  let folder_view = FolderView {
     view_id,
     parent_view_id,
     prev_view_id: None, // 简化处理
-    name: view.name,
-    icon: view.icon.map(|icon| serde_json::from_value(icon).unwrap_or_default()),
+    name,
+    icon: icon.map(|i| serde_json::from_value(i).unwrap_or_default()),
     is_space: false, // 简化处理
     is_private: false,
-    is_favorite: view.is_favorite.unwrap_or(false),
+    is_favorite: is_favorite.unwrap_or(false),
     is_published,
-    layout: view.layout.map(|l| serde_json::from_value(l).unwrap_or_default()).unwrap_or_default(),
-    created_at: view.created_at.and_then(|ts| chrono::DateTime::from_timestamp(ts.timestamp(), 0)).unwrap_or_default(),
-    created_by: view.created_by,
-    last_edited_by: view.last_edited_by,
-    last_edited_time: view.last_edited_time.and_then(|ts| chrono::DateTime::from_timestamp(ts.timestamp(), 0)).unwrap_or_default(),
-    is_locked: view.is_locked.unwrap_or(false),
-    extra: view.extra.map(|e| serde_json::from_value(e).unwrap_or_default()),
+    layout: layout.map(|l| serde_json::from_value(l).unwrap_or_default()).unwrap_or_default(),
+    created_at: created_at.unwrap_or_default(),
+    created_by,
+    last_edited_by,
+    last_edited_time: last_edited_time.unwrap_or_default(),
+    is_locked: is_locked.unwrap_or(false),
+    extra: extra.map(|e| serde_json::from_value(e).unwrap_or_default()),
     children: vec![],
   };
 
-  let page_collab = client_api_entity::workspace_dto::PageCollab {
+  let page_collab = PageCollab {
     view: folder_view,
     data: collab_doc,
     owner,
