@@ -2410,7 +2410,7 @@ async fn get_page_collab_data_for_document_noauth(
     CollabType::Document,
   )
   .await?;
-  let collab = collab_from_doc_state(doc.doc_state.to_vec(), &view_id.to_string()).map_err(
+  let collab = collab_from_doc_state(doc.doc_state.to_vec(), &view_id).map_err(
     |err| {
       AppError::Internal(anyhow::anyhow!(
         "Unable to decode document collab {}: {}",
@@ -2421,7 +2421,7 @@ async fn get_page_collab_data_for_document_noauth(
   )?;
 
   // Open document from collab
-  let doc = Document::open(&collab).map_err(|err| {
+  let doc = Document::open(collab).map_err(|err| {
     AppError::Internal(anyhow::anyhow!("Failed to open document {}: {}", view_id, err))
   })?;
   let doc_state = doc.get_document_data().to_vec();
@@ -2488,11 +2488,12 @@ async fn get_page_collab_data_for_database_noauth(
       )))?
       .database_id
   };
+  let db_oid_uuid = Uuid::parse_str(&db_oid)?;
   let db = get_latest_collab_encoded(
     collab_access_control_storage,
     GetCollabOrigin::Server,
     workspace_id,
-    Uuid::parse_str(&db_oid)?,
+    db_oid_uuid,
     CollabType::Database,
   )
   .await
@@ -2561,8 +2562,10 @@ async fn get_page_collab_data_for_database_noauth(
     .zip(rows.into_iter())
     .map(|(row_id, row)| (row_id.to_string(), row))
     .collect();
+
+  // 修复函数调用参数顺序
   let database_data =
-    get_latest_collab_database_body(workspace_id, Uuid::parse_str(&db_oid)?, collab_access_control_storage, &GetCollabOrigin::Server)
+    get_latest_collab_database_body(workspace_id, db_oid_uuid, collab_access_control_storage, &GetCollabOrigin::Server)
       .await?;
   let data = serde_json::to_value(&database_data).map_err(|err| {
     AppError::Internal(anyhow::anyhow!(
