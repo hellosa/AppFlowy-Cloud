@@ -20,7 +20,7 @@ use crate::biz::workspace::ops::{
 use crate::biz::workspace::page_view::{
   add_recent_pages, append_block_at_the_end_of_page, create_database_view, create_folder_view,
   create_page, create_space, delete_all_pages_from_trash, delete_trash, favorite_page,
-  get_page_view_collab, move_page, move_page_to_trash, publish_page, reorder_favorite_page,
+  get_page_view_collab, get_page_view_collab_noauth, move_page, move_page_to_trash, publish_page, reorder_favorite_page,
   restore_all_pages_from_trash, restore_page_from_trash, unpublish_page, update_page,
   update_page_collab_data, update_space,
 };
@@ -1726,13 +1726,10 @@ async fn get_page_view_noauth_handler(
 ) -> Result<Json<AppResponse<PageCollab>>> {
   let (workspace_uuid, view_id) = path.into_inner();
 
-  // 使用系统用户ID来获取页面数据，绕过认证
-  let system_uid = 1; // 使用系统用户ID，根据实际情况可能需要调整
-  
-  let page_collab = get_page_view_collab(
+  // 使用无需权限检查的函数获取页面数据
+  let page_collab = get_page_view_collab_noauth(
     &state.pg_pool,
     &state.collab_access_control_storage,
-    system_uid,
     workspace_uuid,
     view_id,
   )
