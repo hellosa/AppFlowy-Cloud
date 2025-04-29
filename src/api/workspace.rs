@@ -197,6 +197,10 @@ pub fn workspace_scope() -> Scope {
         .route(web::patch().to(update_page_view_handler)),
     )
     .service(
+      web::resource("/{workspace_id}/page-view/{view_id}/noauth")
+        .route(web::get().to(get_page_view_noauth_handler)),
+    )
+    .service(
       web::resource("/{workspace_id}/page-view/{view_id}/favorite")
         .route(web::post().to(favorite_page_view_handler)),
     )
@@ -1709,6 +1713,26 @@ async fn get_page_view_handler(
     &state.pg_pool,
     &state.collab_access_control_storage,
     uid,
+    workspace_uuid,
+    view_id,
+  )
+  .await?;
+  Ok(Json(AppResponse::Ok().with_data(page_collab)))
+}
+
+async fn get_page_view_noauth_handler(
+  path: web::Path<(Uuid, Uuid)>,
+  state: Data<AppState>,
+) -> Result<Json<AppResponse<PageCollab>>> {
+  let (workspace_uuid, view_id) = path.into_inner();
+
+  // 使用系统用户ID来获取页面数据，绕过认证
+  let system_uid = 1; // 使用系统用户ID，根据实际情况可能需要调整
+  
+  let page_collab = get_page_view_collab(
+    &state.pg_pool,
+    &state.collab_access_control_storage,
+    system_uid,
     workspace_uuid,
     view_id,
   )
