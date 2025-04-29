@@ -19,9 +19,10 @@ use crate::biz::workspace::ops::{
 };
 use crate::biz::workspace::page_view::{
   add_recent_pages, append_block_at_the_end_of_page, create_database_view, create_folder_view,
-  create_page, create_page_with_block, delete_all_pages_from_trash, delete_trash,
-  duplicate_document, favorite_page, get_page_view_collab, move_page, move_page_to_trash,
-  publish_page, restore_all_pages_from_trash, restore_page_from_trash, unpublish_page, update_page,
+  create_page, create_space, delete_all_pages_from_trash, delete_trash, favorite_page,
+  get_page_view_collab, move_page, move_page_to_trash, publish_page, reorder_favorite_page,
+  restore_all_pages_from_trash, restore_page_from_trash, unpublish_page, update_page,
+  update_page_collab_data, update_space,
 };
 use crate::biz::workspace::publish::get_workspace_default_publish_view_info_meta;
 use crate::biz::workspace::quick_note::{
@@ -382,10 +383,6 @@ pub fn workspace_scope() -> Scope {
         .route(web::get().to(get_workspace_invite_code_handler))
         .route(web::delete().to(delete_workspace_invite_code_handler))
         .route(web::post().to(post_workspace_invite_code_handler)),
-    )
-    .service(
-      web::resource("/page-view/{view_id}/noauth")
-        .route(web::get().to(get_page_view_simple_noauth_handler)),
     )
 }
 
@@ -1724,89 +1721,20 @@ async fn get_page_view_handler(
 }
 
 async fn get_page_view_noauth_handler(
-  path: web::Path<(Uuid, Uuid)>,
+  path: web::Path<(Uuid, Uuid, Uuid)>,
   state: Data<AppState>,
 ) -> Result<Json<AppResponse<PageCollab>>> {
-  let (workspace_uuid, view_id) = path.into_inner();
+  let (workspace_uuid, view_id, user_id) = path.into_inner();
 
-  // 使用系统用户ID来获取页面数据，绕过认证
-  let system_uid = 1; // 使用系统用户ID，根据实际情况可能需要调整
-  
   let page_collab = get_page_view_collab(
     &state.pg_pool,
     &state.collab_access_control_storage,
-    system_uid,
+    user_id,
     workspace_uuid,
     view_id,
   )
   .await?;
   Ok(Json(AppResponse::Ok().with_data(page_collab)))
-}
-
-async fn get_page_view_simple_noauth_handler(
-  view_id: web::Path<Uuid>,
-  state: Data<AppState>,
-) -> Result<Json<AppResponse<SimplePageView>>> {
-  let view_id = view_id.into_inner();
-  
-  // 尝试找到视图所在的工作区
-  let workspace_query = sqlx::query!(
-    r#"
-    SELECT workspace_id 
-    FROM af_published_collab
-    WHERE view_id = $1
-    "#,
-    view_id
-  )
-  .fetch_optional(&state.pg_pool)
-  .await
-  .map_err(|e| AppError::Internal(anyhow::anyhow!("查询工作区失败: {}", e)))?;
-  
-  let workspace_id = if let Some(row) = workspace_query {
-    row.workspace_id
-  } else {
-    // 如果不是已发布的视图，可能需要通过其他方式找到它所属的工作区
-    // 或者直接返回错误
-    return Err(AppError::RecordNotFound(format!("找不到视图的工作区: {}", view_id)).into());
-  };
-  
-  // 使用服务器权限而不是用户权限获取folder
-  let folder = get_latest_collab_folder(
-    &state.collab_access_control_storage,
-    GetCollabOrigin::Server,
-    workspace_id,
-  )
-  .await
-  .map_err(|e| AppError::Internal(anyhow::anyhow!("获取folder数据失败: {}", e)))?;
-  
-  let view = folder
-    .get_view(&view_id.to_string())
-    .ok_or(AppError::InvalidFolderView(format!(
-      "View {} not found",
-      view_id
-    )))?;
-    
-  let last_editor_name = if let Some(last_edited_by) = view.last_edited_by {
-    let user = sqlx::query!("SELECT name FROM af_user WHERE uid = $1", last_edited_by)
-      .fetch_optional(&state.pg_pool)
-      .await
-      .map_err(|e| AppError::Internal(anyhow::anyhow!("获取用户数据失败: {}", e)))?;
-    
-    user.map(|u| u.name)
-  } else {
-    None
-  };
-  
-  let last_edited_time = chrono::DateTime::from_timestamp(view.last_edited_time, 0)
-    .map(|dt| dt.with_timezone(&chrono::Utc));
-  
-  let page_view = SimplePageView {
-    view_name: view.name.clone(),
-    last_edited_time,
-    last_editor_name,
-  };
-  
-  Ok(Json(AppResponse::Ok().with_data(page_view)))
 }
 
 async fn favorite_page_view_handler(
@@ -3106,11 +3034,4 @@ async fn post_workspace_invite_code_handler(
     generate_workspace_invite_token(&state.pg_pool, &workspace_id, data.validity_period_hours)
       .await?;
   Ok(Json(AppResponse::Ok().with_data(workspace_invite_link)))
-}
-
-#[derive(serde::Serialize)]
-struct SimplePageView {
-  view_name: String,
-  last_edited_time: Option<chrono::DateTime<chrono::Utc>>,
-  last_editor_name: Option<String>,
 }
