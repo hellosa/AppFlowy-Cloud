@@ -197,7 +197,7 @@ pub fn workspace_scope() -> Scope {
         .route(web::patch().to(update_page_view_handler)),
     )
     .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/noauth")
+      web::resource("/{workspace_id}/page-view/{view_id}/noauth/{user_id}")
         .route(web::get().to(get_page_view_noauth_handler)),
     )
     .service(
