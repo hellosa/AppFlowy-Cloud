@@ -2,7 +2,7 @@ use client_api_entity::workspace_dto::{
   AddRecentPagesParams, AppendBlockToPageParams, CreateFolderViewParams,
   CreatePageDatabaseViewParams, CreatePageParams, CreateSpaceParams, DuplicatePageParams,
   FavoritePageParams, MovePageParams, Page, PageCollab, PublishPageParams, Space, UpdatePageParams,
-  UpdateSpaceParams,
+  UpdateSpaceParams, FolderView,
 };
 use reqwest::Method;
 use serde_json::json;
@@ -368,5 +368,22 @@ impl Client {
       .send()
       .await?;
     process_response_error(resp).await
+  }
+
+  pub async fn get_workspace_folder_noauth(
+    &self,
+    workspace_id: Uuid,
+    user_id: &Uuid,
+  ) -> Result<FolderView, AppResponseError> {
+    let url = format!(
+      "{}/api/workspace/{}/folder/noauth/{}",
+      self.base_url, workspace_id, user_id
+    );
+    let resp = self
+      .http_client(Method::GET, &url)
+      .await?
+      .send()
+      .await?;
+    process_response_data::<FolderView>(resp).await
   }
 }

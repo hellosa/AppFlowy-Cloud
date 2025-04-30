@@ -329,6 +329,10 @@ pub fn workspace_scope() -> Scope {
     .service(
       web::resource("/{workspace_id}/folder").route(web::get().to(get_workspace_folder_handler)),
     )
+    .service(
+      web::resource("/{workspace_id}/folder/noauth/{user_id}")
+        .route(web::get().to(get_workspace_folder_noauth_handler)),
+    )
     .service(web::resource("/{workspace_id}/recent").route(web::get().to(get_recent_views_handler)))
     .service(
       web::resource("/{workspace_id}/favorite").route(web::get().to(get_favorite_views_handler)),
@@ -2401,6 +2405,39 @@ async fn get_workspace_folder_handler(
     .workspace_access_control
     .enforce_action(&uid, &workspace_id, Action::Read)
     .await?;
+  let root_view_id = query.root_view_id.unwrap_or(workspace_id);
+  let folder_view = biz::collab::ops::get_user_workspace_structure(
+    &state.metrics.appflowy_web_metrics,
+    server,
+    &state.collab_access_control_storage,
+    &state.pg_pool,
+    user,
+    workspace_id,
+    depth,
+    &root_view_id,
+  )
+  .await?;
+  Ok(Json(AppResponse::Ok().with_data(folder_view)))
+}
+
+async fn get_workspace_folder_noauth_handler(
+  path: web::Path<(Uuid, Uuid)>,
+  state: Data<AppState>,
+  server: Data<RealtimeServerAddr>,
+  query: web::Query<QueryWorkspaceFolder>,
+  req: HttpRequest,
+) -> Result<Json<AppResponse<FolderView>>> {
+  let (workspace_id, user_id) = path.into_inner();
+  let depth = query.depth.unwrap_or(1);
+  let uid = state
+    .user_cache
+    .get_user_uid(&user_id)
+    .await
+    .map_err(AppResponseError::from)?;
+  let user = realtime_user_for_web_request(req.headers(), uid)?;
+
+  // Skip access control check
+
   let root_view_id = query.root_view_id.unwrap_or(workspace_id);
   let folder_view = biz::collab::ops::get_user_workspace_structure(
     &state.metrics.appflowy_web_metrics,
